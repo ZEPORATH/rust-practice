@@ -108,7 +108,6 @@ fn describe_state_quarter(coin: Coin) -> Option<String> {
 }
 
 fn main() {
-
     println!("Hello, world!");
     demo_enum();
     demo_variant_enum();

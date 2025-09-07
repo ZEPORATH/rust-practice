@@ -18,7 +18,7 @@ fn print_usage_and_exit() -> ! {
 fn main() {
     let mut arg = env::args().skip(1);
     let mode = arg.next().unwrap_or_else(|| {print_usage_and_exit()});
-    let addr = arg.next().unwrap_or_else(|| "127.0.0.0:4444".to_string());
+    let addr = arg.next().unwrap_or_else(|| "localhost:4444".to_string());
     match mode.as_str() {
         "server" => {
             let server  = Server::New(&addr);
