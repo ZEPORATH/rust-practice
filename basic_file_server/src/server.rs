@@ -77,13 +77,15 @@ impl Connection {
     }
 
     fn readable(&mut self) -> io::Result<Option<String>> {
+        println!("readable called, peer: {:?}", self.peer);
         let mut buf = [0u8; 4096];
         loop {
             match self.socket.read(&mut buf) {
                 Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "client closed")),
                 Ok(n) => {
                     self.read_buf.extend_from_slice(&buf[..n]);
-                    if let Some(pos) = self.read_buf.iter().position(|&b| b == b' ') {
+                    // Look for newline as command delimiter
+                    if let Some(pos) = self.read_buf.iter().position(|&b| b == b'\n') {
                         let line = self.read_buf.drain(..=pos).collect::<Vec<u8>>();
                         let line = String::from_utf8_lossy(&line).trim().to_string();
                         return Ok(Some(line));
@@ -98,58 +100,70 @@ impl Connection {
     }
 
     fn writable(&mut self) -> io::Result<()> {
-        // First, if there is an active FileStreamer and we haven't started pushing body, do it in small reads
+        // Keep write_buf reasonable - don't buffer more than 256KB
+        const MAX_WRITE_BUF: usize = 256 * 1024;
+        
+        // First, try to write any existing buffered data
+        while !self.write_buf.is_empty() {
+            match self.socket.write(&self.write_buf) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write")),
+                Ok(n) => {
+                    self.write_buf.drain(..n);
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        
+        // If there's an active FileStreamer, feed more data into write_buf
         if let Some(streamer) = &mut self.current_streamer {
             // Handle header stage
             if matches!(streamer.stage, OutgoingStage::Header) {
-                let header = format!("FILE {}
-", streamer.remaining);
+                let header = format!("FILE {}\n", streamer.remaining);
                 self.write_buf.extend_from_slice(header.as_bytes());
                 streamer.stage = OutgoingStage::Body;
+                println!("Sending FILE header: {} bytes", streamer.remaining);
             }
 
+            // Stream body: keep filling write_buf as long as there's room and file data
             if matches!(streamer.stage, OutgoingStage::Body) {
-                // Read up to CHUNK_SIZE from file into a temporary buffer, update md5 and push into write_buf
-                if streamer.remaining > 0 {
-                    let to_read = std::cmp::min(streamer.remaining as usize, CHUNK_SIZE);
+                while streamer.remaining > 0 && self.write_buf.len() < MAX_WRITE_BUF {
+                    let to_read = std::cmp::min(
+                        std::cmp::min(streamer.remaining as usize, CHUNK_SIZE),
+                        MAX_WRITE_BUF - self.write_buf.len()
+                    );
                     let mut tmp = vec![0u8; to_read];
                     let n = streamer.file.read(&mut tmp)?;
                     if n == 0 {
                         // unexpected EOF
                         streamer.remaining = 0;
-                    } else {
-                        streamer.remaining -= n as u64;
-                        streamer.context.consume(&tmp[..n]);
-                        self.write_buf.extend_from_slice(&tmp[..n]);
+                        break;
                     }
+                    streamer.remaining -= n as u64;
+                    streamer.context.consume(&tmp[..n]);
+                    self.write_buf.extend_from_slice(&tmp[..n]);
                 }
 
                 if streamer.remaining == 0 {
                     streamer.stage = OutgoingStage::Trailing;
                     let digest = streamer.context.clone().finalize();
                     let md5_hex = format!("{:x}", digest);
+                    println!("File transfer complete, MD5: {}", md5_hex);
                     streamer.md5_hex = Some(md5_hex);
                 }
             }
 
             if matches!(streamer.stage, OutgoingStage::Trailing) {
-                self.write_buf.extend_from_slice(b"
-"); // newline after file
+                self.write_buf.extend_from_slice(b"\n"); // newline after file
                 if let Some(ref md5) = streamer.md5_hex {
-                    let md5_line = format!("MD5 {}
-", md5);
+                    let md5_line = format!("MD5 {}\n", md5);
                     self.write_buf.extend_from_slice(md5_line.as_bytes());
                 }
                 streamer.stage = OutgoingStage::Done;
             }
-
-            if matches!(streamer.stage, OutgoingStage::Done) {
-                // file fully queued; drop streamer after bytes are sent
-                // we'll keep it until write_buf drained, then set to None
-            }
         }
 
-        // Then attempt to write as much of write_buf as possible
+        // Try to write again after potentially adding more data
         while !self.write_buf.is_empty() {
             match self.socket.write(&self.write_buf) {
                 Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write")),
@@ -165,6 +179,7 @@ impl Connection {
         if let Some(streamer) = &self.current_streamer {
             if matches!(streamer.stage, OutgoingStage::Done) && self.write_buf.is_empty() {
                 self.current_streamer = None;
+                println!("Streamer removed, transfer complete");
             }
         }
 
@@ -207,6 +222,7 @@ impl Server {
                                 let token = Token(unique_token);
                                 unique_token += 1;
                                 let conn = Connection::new(socket, token, addr);
+                                println!("new connection from {:?}", addr);
                                 poll.registry().register(&mut connections.entry(token).or_insert_with(|| conn).socket, token, Interest::READABLE.add(Interest::WRITABLE))?;
                                 // Ugly: we used entry to borrow socket; better to create then insert, but keep code short here
                                 // Instead, do actual insert properly below
@@ -219,18 +235,25 @@ impl Server {
                         }
                     },
                     tok => {
+                        println!("event for token: {:?}", tok);
                         // get mutable connection
                         if let Some(conn) = connections.get_mut(&tok) {
+                            println!("connection found for token: {:?}", tok);
                             if event.is_readable() {
+                                println!("connection is readable, peer: {:?}", conn.peer);
                                 match conn.readable() {
                                     Ok(Some(line)) => {
+                                        println!("command: {:?}", line);
                                         if let Err(e) = handle_command(line, conn, &self.mount_dir) {
+                                            println!("error handling command from {:?}: {}", conn.peer, e);
                                             eprintln!("error handling command from {:?}: {}", conn.peer, e);
                                             connections.remove(&tok);
                                             continue;
                                         }
                                     }
-                                    Ok(None) => {}
+                                    Ok(None) => {
+                                        println!("no command from {:?}", conn.peer);
+                                    }
                                     Err(e) => {
                                         eprintln!("read error from {:?}: {}", conn.peer, e);
                                         connections.remove(&tok);
@@ -240,7 +263,9 @@ impl Server {
                             }
 
                             if event.is_writable() {
+                                println!("connection is writable");
                                 if let Err(e) = conn.writable() {
+                                    println!("write error to {:?}: {}", conn.peer, e);
                                     eprintln!("write error to {:?}: {}", conn.peer, e);
                                     connections.remove(&tok);
                                     continue;
@@ -273,13 +298,13 @@ fn handle_command(line: String, conn: &mut Connection, mount_dir: &Path) -> io::
                 if entry.path().is_file() {
                     if let Some(name) = entry.file_name().to_str() {
                         out.extend_from_slice(name.as_bytes());
-                        out.push(b' ');
+                        out.push(b'\n');  // Send each filename on its own line
                     }
                 }
             }
-            out.extend_from_slice(b".
-");
+            out.extend_from_slice(b".\n");  // End marker on its own line
             conn.write_buf.extend_from_slice(&out);
+            println!("LIST response prepared: {} bytes", out.len());
         }
         "GET" => {
             if parts.len() < 2 {

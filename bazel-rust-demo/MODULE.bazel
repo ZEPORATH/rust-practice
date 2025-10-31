@@ -1,0 +1,54 @@
+###############################################################################
+# Bazel now uses Bzlmod by default to manage external dependencies.
+# Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.
+#
+# For more details, please check https://github.com/bazelbuild/bazel/issues/18958
+###############################################################################
+# To find additional information on this release or newer ones visit:
+# https://github.com/bazelbuild/rules_rust/releases
+
+module(
+    name = "bazel-rust-demo",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "rules_rust", version = "0.67.0")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2021")
+
+rust.repository_set(
+    name = "rust_aarch64",
+    target_compatible_with = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+    ],
+    target_triple = "aarch64-unknown-linux-gnu-gcc",
+)
+
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# Use the crate extension (not crate_universe)
+crate = use_extension(
+    "@rules_rust//crate_universe:extensions.bzl",
+    "crate",
+)
+# Define dependencies
+crate.spec(
+    package = "tokio",
+    version = "1.48.0",
+    features = ["full"],
+)
+crate.spec(
+    package = "reqwest",
+    version = "0.12.24",
+    features = ["blocking"],
+)
+
+# Use a repository name
+crate.from_specs()
+use_repo(crate, "crates")

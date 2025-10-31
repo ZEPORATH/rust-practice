@@ -1,0 +1,21 @@
+[package]
+name = "proto_rust_demo"
+version = "0.1.0"
+edition = "2024"
+
+
+[lib]
+name = "grpc_demo"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tonic = { version = "0.14.2", features = ["transport"] }
+prost = "0.14.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tonic-prost = "0.14.2"
+
+[build-dependencies]
+tonic-prost-build = "0.14.1"
+
+[features]
+default = []

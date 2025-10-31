@@ -3,6 +3,7 @@ use async_std::net::TcpStream;
 use clap::Parser;
 use md5::Context;
 use std::fs::File;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -32,18 +33,18 @@ impl Client {
 
     pub async fn run_cli(cli: ClientCli) -> io::Result<()> {
         let client = Client::new(&cli.addr);
-        client.list_and_get(cli.get, cli.out).await
+        let mut stream = TcpStream::connect(&client.addr).await?;
+        println!("Connected to {}", client.addr);
+        client.list_and_get(&mut stream, cli.get, cli.out).await
     }
 
-    pub async fn list_and_get(&self, get_filename: Option<String>, out_dir: Option<PathBuf>) -> io::Result<()> {
-        let mut stream = TcpStream::connect(&self.addr).await?;
-        println!("Connected to {}", self.addr);
-
+    pub async fn list_and_get(&self, stream: &mut TcpStream, get_filename: Option<String>, out_dir: Option<PathBuf>) -> io::Result<()> {
+        println!("listing and getting");
         // ask for LIST
-        stream.write_all(b"LIST
-").await?;
+        writeln!(stream, "{}", "LIST").await?;
         stream.flush().await?;
-
+        println!("LIST sent");
+        
         let mut reader = BufReader::new(stream.clone());
         let mut filenames = Vec::new();
         loop {
@@ -92,35 +93,30 @@ impl Client {
         let mut file = File::create(out_dir.join(&filename))?;
 
         // Read exactly size bytes in chunks and show progress
-        let remaining = size;
-        let mut buf = vec![0u8; 32 * 1024];
+        let mut remaining = size;
+        let mut buf = vec![0u8; 64 * 1024];  // 64KB buffer
         let mut total_read = 0usize;
         let mut context = Context::new();
 
         while remaining > 0 {
             let to_read = std::cmp::min(buf.len(), remaining);
-            let _n = reader.read_exact(&mut buf[..to_read]).await?;
-            // read_exact returns (), but read returns usize; so we used read_exact which awaits exact bytes and returns ()
-            // Instead use read into slice
-            // But to keep it simple here: use read into slice
-        }
-
-        // Re-implement the loop properly using read
-        let mut remaining = size;
-        loop {
-            if remaining == 0 { break; }
-            let to_read = std::cmp::min(buf.len(), remaining);
             let n = reader.read(&mut buf[..to_read]).await?;
-            if n == 0 { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "server closed while sending file")); }
+            if n == 0 { 
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, 
+                    format!("server closed while sending file (got {}/{} bytes)", total_read, size))); 
+            }
             context.consume(&buf[..n]);
             file.write_all(&buf[..n])?;
             total_read += n;
             remaining -= n;
-            // progress
-            print!("
-Downloaded {}/{} bytes", total_read, size);
-            use std::io::Write as _;
-            std::io::stdout().flush()?;
+            
+            // Show progress every 1MB or at the end
+            if total_read % (1024 * 1024) == 0 || remaining == 0 {
+                print!("\rDownloaded {}/{} bytes ({:.1}%)", 
+                    total_read, size, (total_read as f64 / size as f64) * 100.0);
+                use std::io::Write as _;
+                std::io::stdout().flush()?;
+            }
         }
         println!();
 

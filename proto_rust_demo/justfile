@@ -1,0 +1,36 @@
+# Default target
+default:
+    @just --list
+
+# Define architectures and output dirs
+# archs := ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+# Build for host (macOS arm64 → Darwin)
+build-host:
+    echo "🏗️  Building for host (macOS arm64)..."
+    export PROTOC="$(brew --prefix protobuf)/bin/protoc"
+    cargo build --release --target aarch64-apple-darwin
+    mkdir -p bin/aarch64-apple-darwin
+    cp target/aarch64-apple-darwin/release/proto_rust_demo bin/aarch64-apple-darwin/
+    cp target/aarch64-apple-darwin/release/*.rlib bin/aarch64-apple-darwin/
+
+# Build for Raspberry Pi (64-bit)
+build-rpi:
+    echo "🏗️  Building for Raspberry Pi (aarch64-linux-gnu)..."
+    export PROTOC="$(brew --prefix protobuf)/bin/protoc"
+    rustup target add aarch64-unknown-linux-gnu
+    cargo build --release --target aarch64-unknown-linux-gnu
+    mkdir -p bin/aarch64-unknown-linux-gnu
+    cp target/aarch64-unknown-linux-gnu/release/proto_rust_demo bin/aarch64-unknown-linux-gnu/
+    cp target/aarch64-unknown-linux-gnu/release/*.rlib bin/aarch64-unknown-linux-gnu/
+
+
+# Build all
+build-all:
+    @just build-host
+    @just build-rpi
+
+# Clean build outputs
+clean:
+    cargo clean
+    rm -rf bin
